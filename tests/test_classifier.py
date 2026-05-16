@@ -75,6 +75,23 @@ class ClassifierPipelineTests(unittest.TestCase):
         self.assertEqual("history_cache", second.source)
         self.assertEqual(first.category, second.category)
 
+    def test_feedback_preserves_original_prediction(self) -> None:
+        payload = TransactionPayload(
+            transaction_id="txn_corrected",
+            merchant="Wegmans #078",
+            amount=-55.0,
+            date="2024-05-10",
+        )
+        first = self.plugin.classify(payload)
+        feedback = self.plugin.feedback(transaction_id="txn_corrected", corrected_category="fitness")
+        second = self.plugin.classify(payload)
+
+        history = self.plugin.classification_history["txn_corrected"]
+        self.assertEqual(first.category, history.predicted_category)
+        self.assertEqual("fitness", history.corrected_category)
+        self.assertEqual("fitness", second.category)
+        self.assertEqual(first.category, feedback["original_predicted_category"])
+
 
 class ApiEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -106,6 +123,16 @@ class ApiEndpointTests(unittest.TestCase):
         self.assertEqual(200, self.api.handle_request("GET", "/health")[0])
         self.assertEqual(200, self.api.handle_request("GET", "/metrics")[0])
         self.assertEqual(200, self.api.handle_request("GET", "/model/version")[0])
+
+    def test_malformed_json_returns_structured_error(self) -> None:
+        status, body = self.api.handle_request("POST", "/classify", "{bad")
+        self.assertEqual(400, status)
+        self.assertEqual("invalid_json", body["error"])
+
+    def test_missing_classify_required_fields_returns_structured_error(self) -> None:
+        status, body = self.api.handle_request("POST", "/classify", '{"transaction_id":"txn_missing"}')
+        self.assertEqual(400, status)
+        self.assertEqual("invalid_request", body["error"])
 
 
 if __name__ == "__main__":

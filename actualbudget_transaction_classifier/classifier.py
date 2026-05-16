@@ -182,7 +182,6 @@ class TransactionClassifierPlugin:
         self.classification_history: Dict[str, ClassificationHistoryEntry] = {}
         self.review_queue: Dict[str, ReviewQueueEntry] = {}
         self.merchant_category_counts: Dict[str, Counter[str]] = defaultdict(Counter)
-        self._processed_ids: set[str] = set()
 
     def _alias_map(self) -> Dict[str, str]:
         aliases: Dict[str, str] = {}
@@ -255,9 +254,10 @@ class TransactionClassifierPlugin:
     def classify(self, payload: TransactionPayload) -> ClassificationResult:
         if payload.transaction_id in self.classification_history:
             existing = self.classification_history[payload.transaction_id]
+            effective_category = existing.corrected_category or existing.predicted_category
             return ClassificationResult(
                 transaction_id=payload.transaction_id,
-                category=existing.predicted_category,
+                category=effective_category,
                 confidence=existing.confidence,
                 coarse_category="Cached",
                 flow="spending_income",
@@ -266,13 +266,12 @@ class TransactionClassifierPlugin:
                 top_features=["duplicate_processing_prevented=true"],
                 merchant_normalization_trace=[],
                 rule_matches=[],
-                model_probabilities={existing.predicted_category: existing.confidence},
-                hierarchy_path=["spending_income", "Cached", existing.predicted_category],
+                model_probabilities={effective_category: existing.confidence},
+                hierarchy_path=["spending_income", "Cached", effective_category],
                 review_required=False,
                 review_flag=False,
             )
 
-        self._processed_ids.add(payload.transaction_id)
         merchant_canonical, normalization_trace = self.normalizer.normalize(payload.merchant, self._alias_map())
 
         history_match = self._user_history_match(merchant_canonical)
@@ -344,6 +343,7 @@ class TransactionClassifierPlugin:
         self.classification_history[payload.transaction_id] = ClassificationHistoryEntry(
             transaction_id=payload.transaction_id,
             predicted_category=category,
+            corrected_category=None,
             confidence=confidence,
             explanation="; ".join(explanations),
             corrected=False,
@@ -372,7 +372,7 @@ class TransactionClassifierPlugin:
             return {"updated": False, "reason": "transaction_not_found"}
 
         history.corrected = True
-        history.predicted_category = corrected_category
+        history.corrected_category = corrected_category
 
         if transaction_id in self.review_queue:
             del self.review_queue[transaction_id]
@@ -380,6 +380,7 @@ class TransactionClassifierPlugin:
         return {
             "updated": True,
             "transaction_id": transaction_id,
+            "original_predicted_category": history.predicted_category,
             "corrected_category": corrected_category,
         }
 

@@ -37,12 +37,23 @@ class ClassifierAPI:
         return self.plugin.model_info()
 
     def handle_request(self, method: str, path: str, body: str = "") -> Tuple[int, Dict[str, Any]]:
-        payload = json.loads(body) if body else {}
+        try:
+            payload = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return 400, {"error": "invalid_json", "message": "Request body is not valid JSON."}
 
         if method == "POST" and path == "/classify":
-            return 200, self.classify(payload)
+            try:
+                return 200, self.classify(payload)
+            except TypeError as exc:
+                return 400, {"error": "invalid_request", "message": str(exc)}
         if method == "POST" and path == "/feedback":
-            return 200, self.feedback(payload)
+            try:
+                return 200, self.feedback(payload)
+            except KeyError as exc:
+                return 400, {"error": "invalid_request", "message": f"Missing required field: {exc.args[0]}"}
+            except TypeError as exc:
+                return 400, {"error": "invalid_request", "message": str(exc)}
         if method == "POST" and path == "/retrain":
             return 200, self.retrain()
         if method == "GET" and path == "/health":
