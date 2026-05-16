@@ -12,6 +12,7 @@ class TransactionPayload:
     amount: float
     date: str
     account: str = "default"
+    notes: str = ""
 
 
 @dataclass

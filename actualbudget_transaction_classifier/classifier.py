@@ -60,42 +60,357 @@ class MerchantNormalizer:
 class RuleEngine:
     def __init__(self) -> None:
         self._rules = [
+            # ── Financial / transfers (check early so they don't mis-match food rules) ──
+            {
+                "id": "financial_transfer_keywords",
+                "priority": 99,
+                "original_contains_any": ["autopay", "e-payment", "crcardpmt", "credit card payment"],
+                "category": "transfers",
+                "confidence": 0.92,
+            },
+            {
+                "id": "monthly_interest",
+                "priority": 98,
+                "original_contains_any": ["monthly interest", "interest paid"],
+                "category": "interest",
+                "confidence": 0.95,
+            },
+            # ── Income ────────────────────────────────────────────────────────────────
+            {
+                "id": "paycheck_income",
+                "priority": 97,
+                "original_contains_any": ["baker hughes", "payroll", "direct dep"],
+                "category": "paychecks",
+                "confidence": 0.93,
+            },
+            # ── Groceries ─────────────────────────────────────────────────────────────
             {
                 "id": "wegmans_grocery_rule",
-                "priority": 100,
-                "pattern": re.compile(r"wegmans"),
+                "priority": 96,
+                "original_contains": "wegmans",
                 "category": "groceries",
                 "confidence": 0.99,
             },
             {
-                "id": "sunoco_gas_rule",
+                "id": "giant_center_entertainment",
                 "priority": 95,
-                "pattern": re.compile(r"sunoco"),
+                "original_contains": "giant center",
+                "category": "entertainment_recreation",
+                "confidence": 0.92,
+            },
+            {
+                "id": "giant_food_groceries",
+                "priority": 94,
+                "original_contains": "giant",
+                "category": "groceries",
+                "confidence": 0.92,
+            },
+            {
+                "id": "weis_markets_groceries",
+                "priority": 93,
+                "original_contains": "weis",
+                "category": "groceries",
+                "confidence": 0.92,
+            },
+            {
+                "id": "walmart_large_shopping",
+                "priority": 92,
+                "original_contains_any": ["walmart", "wal-mart"],
+                "amount_gte": 100.0,
+                "category": "shopping",
+                "confidence": 0.85,
+            },
+            {
+                "id": "walmart_grocery",
+                "priority": 91,
+                "original_contains_any": ["walmart", "wal-mart"],
+                "category": "groceries",
+                "confidence": 0.80,
+            },
+            {
+                "id": "wine_and_spirits_groceries",
+                "priority": 90,
+                "original_contains_any": ["wine and spirits", "wine & spirits", "pa wine"],
+                "category": "groceries",
+                "confidence": 0.90,
+            },
+            # ── Coffee shops ──────────────────────────────────────────────────────────
+            {
+                "id": "dunkin_coffee_rule",
+                "priority": 89,
+                "original_contains": "dunkin",
+                "category": "coffee_shops",
+                "confidence": 0.96,
+            },
+            {
+                "id": "starbucks_coffee",
+                "priority": 88,
+                "original_contains": "starbucks",
+                "category": "coffee_shops",
+                "confidence": 0.97,
+            },
+            {
+                "id": "panera_coffee",
+                "priority": 87,
+                "original_contains": "panera",
+                "category": "coffee_shops",
+                "confidence": 0.87,
+            },
+            {
+                "id": "coffee_keyword",
+                "priority": 86,
+                "original_contains": "coffee",
+                "category": "coffee_shops",
+                "confidence": 0.88,
+            },
+            # ── Gas stations ──────────────────────────────────────────────────────────
+            {
+                "id": "sunoco_gas_rule",
+                "priority": 85,
+                "original_contains": "sunoco",
                 "category": "gas",
                 "confidence": 0.98,
             },
             {
+                "id": "shell_gas",
+                "priority": 84,
+                "original_contains": "shell",
+                "category": "gas",
+                "confidence": 0.90,
+            },
+            {
+                "id": "exxonmobil_gas",
+                "priority": 83,
+                "original_contains_any": ["exxonmobil", "exxon"],
+                "category": "gas",
+                "confidence": 0.95,
+            },
+            {
+                "id": "bp_gas",
+                "priority": 82,
+                "original_contains": "bp gas",
+                "category": "gas",
+                "confidence": 0.90,
+            },
+            {
+                "id": "wawa_gas",
+                "priority": 81,
+                "original_contains": "wawa",
+                "category": "gas",
+                "confidence": 0.82,
+            },
+            {
+                "id": "sheetz_gas",
+                "priority": 80,
+                "original_contains": "sheetz",
+                "category": "gas",
+                "confidence": 0.92,
+            },
+            {
+                "id": "bucees_gas",
+                "priority": 79,
+                "original_contains_any": ["buc-ee", "bucees", "buc ee"],
+                "category": "gas",
+                "confidence": 0.88,
+            },
+            # ── Phone ─────────────────────────────────────────────────────────────────
+            {
                 "id": "google_fi_phone_rule",
-                "priority": 90,
-                "pattern": re.compile(r"google_fi"),
+                "priority": 78,
+                "original_contains_any": ["google *fi", "google fi", "google_fi"],
                 "category": "phone",
                 "confidence": 0.98,
             },
+            # ── Utilities ─────────────────────────────────────────────────────────────
             {
-                "id": "dunkin_coffee_rule",
-                "priority": 85,
-                "pattern": re.compile(r"dunkin"),
-                "category": "coffee_shops",
+                "id": "service_electric_cable",
+                "priority": 77,
+                "original_contains_any": ["service elec", "serviceelectric"],
+                "category": "cable_internet",
+                "confidence": 0.97,
+            },
+            {
+                "id": "lewisburg_water",
+                "priority": 76,
+                "original_contains": "lewisburg area joint",
+                "category": "water",
+                "confidence": 0.99,
+            },
+            {
+                "id": "fishers_disposal_garbage",
+                "priority": 75,
+                "original_contains": "fishers disposal",
+                "category": "garbage",
+                "confidence": 0.98,
+            },
+            # ── Transport ─────────────────────────────────────────────────────────────
+            {
+                "id": "ezpass_tolls",
+                "priority": 74,
+                "original_contains_any": ["e-zpass", "ezpass", "turnpike", "eractoll"],
+                "category": "parking_tolls",
+                "confidence": 0.92,
+            },
+            {
+                "id": "parking_services",
+                "priority": 73,
+                "original_contains_any": ["spothero", "parkingmeter", "parkmobile", "nyc dot parking", "university parking"],
+                "category": "parking_tolls",
+                "confidence": 0.90,
+            },
+            {
+                "id": "penndot_auto",
+                "priority": 72,
+                "original_contains_any": ["pa driver", "penndot", "pennsylvania driver"],
+                "category": "auto_maintenance",
+                "confidence": 0.92,
+            },
+            {
+                "id": "uber_rideshare",
+                "priority": 71,
+                "original_contains": "uber",
+                "category": "rideshare",
+                "confidence": 0.92,
+            },
+            {
+                "id": "public_transit",
+                "priority": 70,
+                "original_contains_any": ["nj transit", "njtransit", "omny", "septa", "mta nyc"],
+                "category": "public_transit",
+                "confidence": 0.93,
+            },
+            {
+                "id": "enterprise_car_rental",
+                "priority": 69,
+                "original_contains": "enterprise",
+                "category": "car_rental",
+                "confidence": 0.88,
+            },
+            # ── Fitness ───────────────────────────────────────────────────────────────
+            {
+                "id": "ymca_fitness",
+                "priority": 68,
+                "original_contains": "ymca",
+                "category": "fitness",
+                "confidence": 0.95,
+            },
+            # ── Entertainment ─────────────────────────────────────────────────────────
+            {
+                "id": "spotify_entertainment",
+                "priority": 67,
+                "original_contains": "spotify",
+                "category": "entertainment_recreation",
                 "confidence": 0.96,
+            },
+            # ── Business / office ─────────────────────────────────────────────────────
+            {
+                "id": "github_office",
+                "priority": 66,
+                "original_contains": "github",
+                "category": "office_supplies",
+                "confidence": 0.95,
+            },
+            {
+                "id": "cloudflare_office",
+                "priority": 65,
+                "original_contains": "cloudflare",
+                "category": "office_supplies",
+                "confidence": 0.93,
+            },
+            {
+                "id": "aws_office",
+                "priority": 64,
+                "original_contains_any": ["amazon web services", "aws"],
+                "category": "office_supplies",
+                "confidence": 0.90,
+            },
+            {
+                "id": "backblaze_office",
+                "priority": 63,
+                "original_contains": "backblaze",
+                "category": "office_supplies",
+                "confidence": 0.94,
+            },
+            # ── Shopping ──────────────────────────────────────────────────────────────
+            {
+                "id": "amazon_shopping",
+                "priority": 62,
+                "original_contains": "amazon",
+                "category": "shopping",
+                "confidence": 0.82,
+            },
+            {
+                "id": "doordash_dining",
+                "priority": 61,
+                "original_contains": "doordash",
+                "category": "dining_out",
+                "confidence": 0.88,
+            },
+            # ── Health ────────────────────────────────────────────────────────────────
+            {
+                "id": "cvs_pharmacy",
+                "priority": 60,
+                "original_contains": "cvs",
+                "category": "pharmacy",
+                "confidence": 0.90,
+            },
+            # ── Taxes / financial services ────────────────────────────────────────────
+            {
+                "id": "turbotax_tax",
+                "priority": 59,
+                "original_contains": "turbotax",
+                "category": "taxes",
+                "confidence": 0.97,
+            },
+            {
+                "id": "irs_taxes",
+                "priority": 58,
+                "original_contains": "irs",
+                "category": "taxes",
+                "confidence": 0.97,
+            },
+            {
+                "id": "fidelity_investments",
+                "priority": 57,
+                "original_contains": "fidelity",
+                "category": "investments",
+                "confidence": 0.92,
+            },
+            # ── Home ──────────────────────────────────────────────────────────────────
+            {
+                "id": "landscaping_home",
+                "priority": 56,
+                "original_contains_any": ["landscapes", "landscaping", "landscape"],
+                "category": "home_maintenance",
+                "confidence": 0.85,
             },
         ]
 
-    def apply(self, merchant_canonical: str) -> Tuple[Optional[Dict[str, object]], List[str]]:
+    @staticmethod
+    def _rule_matches(rule: Dict[str, object], search_text: str, amount: float) -> bool:
+        if "original_contains" in rule:
+            if str(rule["original_contains"]).lower() not in search_text:
+                return False
+        if "original_contains_any" in rule:
+            needles = [str(n).lower() for n in rule["original_contains_any"]]  # type: ignore[arg-type]
+            if not any(n in search_text for n in needles):
+                return False
+        if "amount_lt" in rule:
+            if abs(amount) >= float(rule["amount_lt"]):  # type: ignore[arg-type]
+                return False
+        if "amount_gte" in rule:
+            if abs(amount) < float(rule["amount_gte"]):  # type: ignore[arg-type]
+                return False
+        # At least one match condition must be present
+        return any(k in rule for k in ("original_contains", "original_contains_any"))
+
+    def apply(self, merchant_canonical: str, notes_text: str = "", amount: float = 0.0) -> Tuple[Optional[Dict[str, object]], List[str]]:
+        search_text = f"{merchant_canonical} {notes_text.strip().lower()}"
         matches: List[Tuple[int, Dict[str, object]]] = []
         trace: List[str] = []
         for rule in self._rules:
-            if rule["pattern"].search(merchant_canonical):
-                matches.append((int(rule["priority"]), rule))
+            if self._rule_matches(rule, search_text, amount):
+                matches.append((int(rule["priority"]), rule))  # type: ignore[arg-type]
         if not matches:
             return None, trace
 
@@ -124,14 +439,44 @@ class ConfidenceCalibrator:
 
 class HierarchicalMLPipeline:
     _keyword_map = {
+        # Food
         "groceries": ("spending_income", "Food", 0.92),
         "coffee": ("spending_income", "Food", 0.86),
+        "dining": ("spending_income", "Food", 0.78),
+        "restaurant": ("spending_income", "Food", 0.78),
+        "brewing": ("spending_income", "Food", 0.76),
+        "pizza": ("spending_income", "Food", 0.82),
+        "bakery": ("spending_income", "Food", 0.80),
+        "sushi": ("spending_income", "Food", 0.82),
+        "kitchen": ("spending_income", "Food", 0.72),
+        # Transport
         "gas": ("spending_income", "Transport", 0.88),
         "parking": ("spending_income", "Transport", 0.78),
+        "tolls": ("spending_income", "Transport", 0.78),
+        "transit": ("spending_income", "Transport", 0.82),
+        "uber": ("spending_income", "Transport", 0.80),
+        # Utilities
         "garbage": ("spending_income", "Utilities", 0.83),
         "phone": ("spending_income", "Utilities", 0.87),
+        # Lifestyle / health
         "fitness": ("spending_income", "Lifestyle", 0.84),
+        "pharmacy": ("spending_income", "Health", 0.82),
+        # Entertainment
+        "entertainment": ("spending_income", "Entertainment", 0.76),
+        "streaming": ("spending_income", "Entertainment", 0.82),
+        "museum": ("spending_income", "Entertainment", 0.80),
+        "theater": ("spending_income", "Entertainment", 0.80),
+        # Shopping
+        "shopping": ("spending_income", "Shopping", 0.72),
+        "amazon": ("spending_income", "Shopping", 0.72),
+        "walmart": ("spending_income", "Shopping", 0.72),
+        # Income
         "payroll": ("financial", "Income", 0.93),
+        "paycheck": ("financial", "Income", 0.93),
+        # Financial
+        "interest": ("financial", "Financial", 0.88),
+        "transfer": ("financial", "Financial", 0.88),
+        "tax": ("financial", "Financial", 0.82),
     }
 
     def infer(self, merchant_canonical: str, amount: float) -> Tuple[str, str, str, Dict[str, float], float]:
@@ -241,15 +586,46 @@ class TransactionClassifierPlugin:
 
     @staticmethod
     def _coarse_from_category(category: str) -> str:
-        if category in {"groceries", "coffee_shops"}:
-            return "Food"
-        if category in {"gas", "parking"}:
-            return "Transport"
-        if category in {"phone", "garbage"}:
-            return "Utilities"
-        if category in {"fitness"}:
-            return "Lifestyle"
-        return "Uncategorized"
+        _map: Dict[str, str] = {
+            # Food
+            "groceries": "Food",
+            "coffee_shops": "Food",
+            "dining_out": "Food",
+            # Transport
+            "gas": "Transport",
+            "parking": "Transport",
+            "parking_tolls": "Transport",
+            "parking & tolls": "Transport",
+            "public_transit": "Transport",
+            "rideshare": "Transport",
+            "car_rental": "Transport",
+            "auto_maintenance": "Transport",
+            # Utilities
+            "phone": "Utilities",
+            "garbage": "Utilities",
+            "cable_internet": "Utilities",
+            "water": "Utilities",
+            # Lifestyle
+            "fitness": "Lifestyle",
+            # Entertainment
+            "entertainment_recreation": "Entertainment",
+            # Shopping
+            "shopping": "Shopping",
+            # Health
+            "pharmacy": "Health",
+            # Business
+            "office_supplies": "Business",
+            # Income
+            "paychecks": "Income",
+            # Financial
+            "investments": "Financial",
+            "interest": "Financial",
+            "transfers": "Financial",
+            "taxes": "Financial",
+            # Home
+            "home_maintenance": "Home",
+        }
+        return _map.get(category, "Uncategorized")
 
     def classify(self, payload: TransactionPayload) -> ClassificationResult:
         if payload.transaction_id in self.classification_history:
@@ -282,7 +658,7 @@ class TransactionClassifierPlugin:
         else:
             history_category, history_confidence = None, None
 
-        rule, rule_matches = self.rule_engine.apply(merchant_canonical)
+        rule, rule_matches = self.rule_engine.apply(merchant_canonical, payload.notes, payload.amount)
 
         if rule:
             category = str(rule["category"])
