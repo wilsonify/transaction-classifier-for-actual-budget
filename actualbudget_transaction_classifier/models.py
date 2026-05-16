@@ -48,6 +48,7 @@ class MerchantRegistryEntry:
 class ClassificationHistoryEntry:
     transaction_id: str
     predicted_category: str
+    corrected_category: Optional[str]
     confidence: float
     explanation: str
     corrected: bool
