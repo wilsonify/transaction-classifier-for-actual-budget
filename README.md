@@ -37,3 +37,17 @@ status, body = api.handle_request(
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## Build training data from Monarch exports
+
+Use Monarch snapshots in `tests/transactions/from-monarch` to create a training dataset aligned to the Actual transaction schema.
+
+```bash
+python tests/build_training_dataset.py
+```
+
+This script:
+- deduplicates transactions across snapshots,
+- keeps the newest snapshot label for each transaction,
+- maps Monarch categories into plugin categories,
+- writes `tests/transactions/from-actual/All-Accounts-training.csv`.
