@@ -669,6 +669,7 @@ def defuzzify(category_scores, strategy="hybrid", config=None, model_scores=None
             hierarchy_path=[],
         )
 
+        # Remove unreachable code
         if merchant_canonical in self.merchant_registry:
             self.merchant_registry[merchant_canonical].transaction_count += 1
 
