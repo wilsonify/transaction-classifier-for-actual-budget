@@ -70,9 +70,6 @@ class RuleEngine:
             },
             {
                 "id": "monthly_interest",
-                "priority": 98,
-                "original_contains_any": ["monthly interest", "interest paid"],
-                "category": "interest",
                 "confidence": 0.95,
             },
             # ── Income ────────────────────────────────────────────────────────────────
@@ -388,21 +385,16 @@ class RuleEngine:
 
     @staticmethod
     def _rule_matches(rule: Dict[str, object], search_text: str, amount: float) -> bool:
-        if "original_contains" in rule:
-            if str(rule["original_contains"]).lower() not in search_text:
-                return False
-        if "original_contains_any" in rule:
-            needles = [str(n).lower() for n in rule["original_contains_any"]]  # type: ignore[arg-type]
-            if not any(n in search_text for n in needles):
-                return False
-        if "amount_lt" in rule:
-            if abs(amount) >= float(rule["amount_lt"]):  # type: ignore[arg-type]
-                return False
-        if "amount_gte" in rule:
-            if abs(amount) < float(rule["amount_gte"]):  # type: ignore[arg-type]
-                return False
-        # At least one match condition must be present
-        return any(k in rule for k in ("original_contains", "original_contains_any"))
+        text_contains = rule.get("text_contains")
+        amount_lt = rule.get("amount_lt")
+        amount_gte = rule.get("amount_gte")
+
+        conditions = [
+            isinstance(text_contains, str) and text_contains in search_text,
+            isinstance(amount_lt, (int, float)) and amount < amount_lt,
+            isinstance(amount_gte, (int, float)) and amount >= amount_gte,
+        ]
+        return all(conditions)
 
     def apply(self, merchant_canonical: str, notes_text: str = "", amount: float = 0.0) -> Tuple[Optional[Dict[str, object]], List[str]]:
         search_text = f"{merchant_canonical} {notes_text.strip().lower()}"
@@ -628,114 +620,67 @@ class TransactionClassifierPlugin:
         return _map.get(category, "Uncategorized")
 
     def classify(self, payload: TransactionPayload) -> ClassificationResult:
-        if payload.transaction_id in self.classification_history:
-            existing = self.classification_history[payload.transaction_id]
-            effective_category = existing.corrected_category or existing.predicted_category
-            return ClassificationResult(
-                transaction_id=payload.transaction_id,
-                category=effective_category,
-                confidence=existing.confidence,
-                coarse_category="Cached",
-                flow="spending_income",
-                source="history_cache",
-                explanations=["transaction already classified"],
-                top_features=["duplicate_processing_prevented=true"],
-                merchant_normalization_trace=[],
-                rule_matches=[],
-                model_probabilities={effective_category: existing.confidence},
-                hierarchy_path=["spending_income", "Cached", effective_category],
-                review_required=False,
-                review_flag=False,
-            )
+        merchant_canonical, _ = self.normalizer.normalize(payload.merchant, self._alias_map())
+        rule, _ = self.rule_engine.apply(merchant_canonical, payload.notes, payload.amount)
+        model_scores = {}
+        if hasattr(self, 'model'):
+            predict_proba = getattr(self.model, 'predict_proba', None)
+            if callable(predict_proba):
+                scores = predict_proba(payload)
+                if isinstance(scores, dict) and all(isinstance(k, str) and isinstance(v, (int, float)) for k, v in scores.items()):
+                    model_scores = scores
 
-        merchant_canonical, normalization_trace = self.normalizer.normalize(payload.merchant, self._alias_map())
-
-        history_match = self._user_history_match(merchant_canonical)
-        history_consistency = None
-        if history_match:
-            history_category, history_confidence = history_match
-            history_consistency = (history_confidence - 0.65) / 0.3
-        else:
-            history_category, history_confidence = None, None
-
-        rule, rule_matches = self.rule_engine.apply(merchant_canonical, payload.notes, payload.amount)
-
-        if rule:
-            category = str(rule["category"])
-            raw_confidence = float(rule["confidence"])
-            source = "rule_engine"
-            flow = "spending_income" if payload.amount <= 0 else "financial"
-            coarse = self._coarse_from_category(category)
-            probabilities = {category: raw_confidence}
-        elif history_category and history_confidence:
-            category = history_category
-            raw_confidence = history_confidence
-            source = "user_history"
-            flow = "spending_income" if payload.amount <= 0 else "financial"
-            coarse = self._coarse_from_category(category)
-            probabilities = {category: raw_confidence}
-        else:
-            flow, coarse, category, probabilities, raw_confidence = self.ml.infer(merchant_canonical, payload.amount)
-            source = "ml_inference"
-
-        if merchant_canonical in self.merchant_registry:
-            registry_boost = self.merchant_registry[merchant_canonical].confidence
-            raw_confidence = min(0.999, raw_confidence * 0.7 + registry_boost * 0.3)
-
-        confidence = round(self.calibrator.calibrate(raw_confidence), 4)
-
-        review_required, review_flag, review_reason = self._review_decision(confidence, merchant_canonical)
-
-        explanations, top_features = self._build_explanations(
-            merchant_canonical,
-            confidence,
-            source,
-            normalization_trace,
-            rule_matches,
-            history_consistency,
+        category_scores = {str(rule): 1.0} if rule else model_scores
+        final_category, confidence, *_ = defuzzify(
+            category_scores, model_scores=model_scores, rule_override=rule
         )
 
-        hierarchy_path = [flow, coarse, category]
-        alternatives = sorted(probabilities, key=probabilities.get, reverse=True)[:3]
-        result = ClassificationResult(
+def defuzzify(category_scores, strategy="hybrid", config=None, model_scores=None, fuzzy_scores=None, rule_override=None):
+    if config is None:
+        config = {"threshold": 0.6, "margin": 0.15, "fallback": "model"}
+    normalized = {k: max(v, 0.0) for k, v in category_scores.items()}
+    total = sum(normalized.values())
+    if total > 0:
+        normalized = {k: v / total for k, v in normalized.items()}
+    top_category, top_score = max(normalized.items(), key=lambda x: x[1])
+    second_score = max((v for k, v in normalized.items() if k != top_category), default=0.0)
+    margin = top_score - second_score
+    if top_score >= config["threshold"] and margin >= config["margin"]:
+        return top_category, top_score, margin, normalized, False, "defuzzified by threshold"
+    return "uncertain", top_score, margin, normalized, True, "marked uncertain"
+        # Initialize variables
+        explanations = []
+        review_required = False
+        review_reason = None
+
+        # Return classification result with corrected argument types
+        return ClassificationResult(
             transaction_id=payload.transaction_id,
-            category=category,
+            category=final_category,
             confidence=confidence,
-            coarse_category=coarse,
-            flow=flow,
-            source=source,
+            coarse_category="unknown",
+            flow="unknown",
+            source="classifier",
             explanations=explanations,
-            top_features=top_features,
-            merchant_normalization_trace=normalization_trace,
-            rule_matches=rule_matches,
-            model_probabilities=probabilities,
-            hierarchy_path=hierarchy_path,
-            review_reason=review_reason,
-            review_required=review_required,
-            review_flag=review_flag,
-            suggested_alternatives=alternatives,
+            top_features=[],
+            merchant_normalization_trace=[],
+            rule_matches=[],
+            model_probabilities=model_scores,
+            hierarchy_path=[],
         )
 
-        self.classification_history[payload.transaction_id] = ClassificationHistoryEntry(
-            transaction_id=payload.transaction_id,
-            predicted_category=category,
-            corrected_category=None,
-            confidence=confidence,
-            explanation="; ".join(explanations),
-            corrected=False,
-        )
-
+        # Remove unreachable code
         if merchant_canonical in self.merchant_registry:
             self.merchant_registry[merchant_canonical].transaction_count += 1
 
-        self.merchant_category_counts[merchant_canonical][category] += 1
+        self.merchant_category_counts[merchant_canonical][final_category] += 1
 
         if review_required:
             self.review_queue[payload.transaction_id] = ReviewQueueEntry(
                 transaction_id=payload.transaction_id,
                 reason=review_reason or "manual_review",
                 confidence=confidence,
-                predicted_category=category,
+                predicted_category=final_category,
                 explanations=explanations,
                 suggested_alternatives=alternatives,
             )
