@@ -620,56 +620,73 @@ class TransactionClassifierPlugin:
         return _map.get(category, "Uncategorized")
 
     def classify(self, payload: TransactionPayload) -> ClassificationResult:
-        merchant_canonical, _ = self.normalizer.normalize(payload.merchant, self._alias_map())
-        rule, _ = self.rule_engine.apply(merchant_canonical, payload.notes, payload.amount)
-        model_scores = {}
-        if hasattr(self, 'model'):
-            predict_proba = getattr(self.model, 'predict_proba', None)
-            if callable(predict_proba):
-                scores = predict_proba(payload)
-                if isinstance(scores, dict) and all(isinstance(k, str) and isinstance(v, (int, float)) for k, v in scores.items()):
-                    model_scores = scores
+        merchant_canonical, normalization_trace = self.normalizer.normalize(payload.merchant, self._alias_map())
+        rule, rule_matches = self.rule_engine.apply(merchant_canonical, payload.notes, payload.amount)
+        flow, _, _, model_scores, _ = self.ml.infer(merchant_canonical, payload.amount)
 
-        category_scores = {str(rule): 1.0} if rule else model_scores
-        final_category, confidence, *_ = defuzzify(
-            category_scores, model_scores=model_scores, rule_override=rule
+        history_match = self._user_history_match(merchant_canonical)
+        history_consistency = history_match[1] if history_match else None
+
+        category_scores = dict(model_scores)
+        if history_match:
+            history_category, consistency = history_match
+            category_scores[history_category] = category_scores.get(history_category, 0.0) + consistency * 0.4
+
+        if rule:
+            final_category = str(rule["category"])
+            confidence = float(rule.get("confidence", 1.0))
+            normalized_scores = {final_category: 1.0}
+            source = "rule_engine"
+        else:
+            final_category, confidence, _, normalized_scores, _, _ = defuzzify(category_scores)
+            source = "hybrid"
+
+        confidence = self.calibrator.calibrate(confidence)
+        coarse_category = self._coarse_from_category(final_category)
+        explanations, top_features = self._build_explanations(
+            merchant_canonical=merchant_canonical,
+            confidence=confidence,
+            source=source,
+            normalization_trace=normalization_trace,
+            rule_matches=rule_matches,
+            history_consistency=history_consistency,
         )
 
-def defuzzify(category_scores, strategy="hybrid", config=None, model_scores=None, fuzzy_scores=None, rule_override=None):
-    if config is None:
-        config = {"threshold": 0.6, "margin": 0.15, "fallback": "model"}
-    normalized = {k: max(v, 0.0) for k, v in category_scores.items()}
-    total = sum(normalized.values())
-    if total > 0:
-        normalized = {k: v / total for k, v in normalized.items()}
-    top_category, top_score = max(normalized.items(), key=lambda x: x[1])
-    second_score = max((v for k, v in normalized.items() if k != top_category), default=0.0)
-    margin = top_score - second_score
-    if top_score >= config["threshold"] and margin >= config["margin"]:
-        return top_category, top_score, margin, normalized, False, "defuzzified by threshold"
-    return "uncertain", top_score, margin, normalized, True, "marked uncertain"
-        # Initialize variables
-        explanations = []
-        review_required = False
-        review_reason = None
+        review_required, review_flag, review_reason = self._review_decision(confidence, merchant_canonical)
+        alternatives = [
+            category
+            for category, _ in sorted(normalized_scores.items(), key=lambda item: item[1], reverse=True)
+            if category != final_category
+        ][:3]
 
-        # Return classification result with corrected argument types
-        return ClassificationResult(
+        result = ClassificationResult(
             transaction_id=payload.transaction_id,
             category=final_category,
             confidence=confidence,
-            coarse_category="unknown",
-            flow="unknown",
-            source="classifier",
+            coarse_category=coarse_category,
+            flow=flow,
+            source=source,
             explanations=explanations,
-            top_features=[],
-            merchant_normalization_trace=[],
-            rule_matches=[],
-            model_probabilities=model_scores,
-            hierarchy_path=[],
+            top_features=top_features,
+            merchant_normalization_trace=normalization_trace,
+            rule_matches=rule_matches,
+            model_probabilities={k: float(v) for k, v in normalized_scores.items()},
+            hierarchy_path=[flow, coarse_category, final_category],
+            review_reason=review_reason,
+            review_required=review_required,
+            review_flag=review_flag,
+            suggested_alternatives=alternatives,
         )
 
-        # Remove unreachable code
+        self.classification_history[payload.transaction_id] = ClassificationHistoryEntry(
+            transaction_id=payload.transaction_id,
+            predicted_category=final_category,
+            corrected_category=None,
+            confidence=confidence,
+            explanation="; ".join(explanations),
+            corrected=False,
+        )
+
         if merchant_canonical in self.merchant_registry:
             self.merchant_registry[merchant_canonical].transaction_count += 1
 
@@ -738,3 +755,36 @@ def defuzzify(category_scores, strategy="hybrid", config=None, model_scores=None
             "calibration_error": self.model_version.calibration_error,
             "training_rows": self.model_version.training_rows,
         }
+
+
+def defuzzify(
+    category_scores: Dict[str, float],
+    strategy: str = "hybrid",
+    config: Optional[Dict[str, float | str]] = None,
+    model_scores: Optional[Dict[str, float]] = None,
+    fuzzy_scores: Optional[Dict[str, float]] = None,
+    rule_override: Optional[Dict[str, object]] = None,
+) -> Tuple[str, float, float, Dict[str, float], bool, str]:
+    _ = (strategy, model_scores, fuzzy_scores, rule_override)
+    if config is None:
+        config = {"threshold": 0.6, "margin": 0.15, "fallback": "model"}
+
+    if not category_scores:
+        return "misc", 0.0, 0.0, {"misc": 1.0}, True, "no_scores"
+
+    normalized = {k: max(float(v), 0.0) for k, v in category_scores.items()}
+    total = sum(normalized.values())
+    if total <= 0:
+        return "misc", 0.0, 0.0, {"misc": 1.0}, True, "invalid_scores"
+
+    normalized = {k: v / total for k, v in normalized.items()}
+    top_category, top_score = max(normalized.items(), key=lambda item: item[1])
+    second_score = max((v for k, v in normalized.items() if k != top_category), default=0.0)
+    margin = top_score - second_score
+
+    threshold = float(config.get("threshold", 0.6))
+    min_margin = float(config.get("margin", 0.15))
+
+    if top_score >= threshold and margin >= min_margin:
+        return top_category, top_score, margin, normalized, False, "defuzzified by threshold"
+    return top_category, top_score, margin, normalized, True, "low separation"
