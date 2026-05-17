@@ -15,6 +15,7 @@ spec:
           labels:
             {{- include "actualbudget-classifier.selectorLabels" . | nindent 12 }}
         spec:
+          automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
           restartPolicy: OnFailure
           containers:
             - name: retrain

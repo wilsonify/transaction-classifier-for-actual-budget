@@ -94,6 +94,28 @@ class ClassifierPipelineTests(unittest.TestCase):
         self.assertEqual("fitness", second.category)
         self.assertEqual(first.category, feedback["original_predicted_category"])
 
+    def test_repeat_merchant_uses_history_consistency_features(self) -> None:
+        first = self.plugin.classify(
+            TransactionPayload(
+                transaction_id="txn_history_1",
+                merchant="Sunoco 0099368300",
+                amount=-40.0,
+                date="2024-05-10",
+            )
+        )
+        second = self.plugin.classify(
+            TransactionPayload(
+                transaction_id="txn_history_2",
+                merchant="Sunoco 0099368300",
+                amount=-41.0,
+                date="2024-05-11",
+            )
+        )
+
+        self.assertEqual(first.category, second.category)
+        self.assertIn("historical_user_category_consistency=95%", second.explanations)
+        self.assertIn("merchant_purity=0.95", second.top_features)
+
 
 class ApiEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -135,6 +157,20 @@ class ApiEndpointTests(unittest.TestCase):
         status, body = self.api.handle_request("POST", "/classify", '{"transaction_id":"txn_missing"}')
         self.assertEqual(400, status)
         self.assertEqual("invalid_request", body["error"])
+
+    def test_import_batch_requires_list_transactions(self) -> None:
+        status, body = self.api.handle_request(
+            "POST",
+            "/events/transactions/imported",
+            '{"transactions":{"transaction_id":"txn_bad"}}',
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid_request", body["error"])
+
+    def test_unknown_endpoint_returns_not_found(self) -> None:
+        status, body = self.api.handle_request("GET", "/missing")
+        self.assertEqual(404, status)
+        self.assertEqual("not_found", body["error"])
 
 
 class PersistentPluginApiTests(unittest.TestCase):

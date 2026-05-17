@@ -19,6 +19,7 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "actualbudget-classifier.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       containers:
         - name: classifier
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

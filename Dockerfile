@@ -8,7 +8,7 @@ WORKDIR /app
 RUN addgroup --system classifier && adduser --system --ingroup classifier classifier
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --only-binary=:all: --require-hashes -r requirements.txt
 
 COPY actualbudget_transaction_classifier ./actualbudget_transaction_classifier
 

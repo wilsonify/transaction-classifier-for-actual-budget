@@ -1,4 +1,6 @@
 {{- if .Values.actualbudgetIntegration.enabled }}
+{{- $actualbudgetBaseUrl := printf "%s://%s:%v" .Values.actualbudgetIntegration.actualbudgetServiceScheme .Values.actualbudgetIntegration.actualbudgetServiceHost .Values.actualbudgetIntegration.actualbudgetServicePort }}
+{{- $classifierBaseUrl := printf "%s://%s:%v" .Values.actualbudgetIntegration.classifierServiceScheme .Values.actualbudgetIntegration.classifierServiceHost .Values.actualbudgetIntegration.classifierServicePort }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -15,6 +17,7 @@ spec:
           labels:
             {{- include "actualbudget-classifier.selectorLabels" . | nindent 12 }}
         spec:
+          automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
           restartPolicy: OnFailure
           containers:
             - name: sync-forwarder
@@ -23,12 +26,16 @@ spec:
                 - /bin/sh
                 - -ec
                 - |
-                  HEADER_ARGS=""
                   if [ -n "{{ .Values.actualbudgetIntegration.authHeader }}" ]; then
-                    HEADER_ARGS="-H {{ .Values.actualbudgetIntegration.authHeader | quote }}"
+                    curl -fsS -H "{{ .Values.actualbudgetIntegration.authHeader }}" "{{ $actualbudgetBaseUrl }}{{ .Values.actualbudgetIntegration.eventFeedPath }}" > /tmp/payload.json
+                  else
+                    curl -fsS "{{ $actualbudgetBaseUrl }}{{ .Values.actualbudgetIntegration.eventFeedPath }}" > /tmp/payload.json
                   fi
-                  eval "curl -fsS $HEADER_ARGS {{ .Values.actualbudgetIntegration.actualbudgetServiceUrl }}{{ .Values.actualbudgetIntegration.eventFeedPath }} > /tmp/payload.json"
                   if [ -s /tmp/payload.json ]; then
-                    eval "curl -fsS -X POST {{ .Values.actualbudgetIntegration.classifierServiceUrl }}/events/transactions/imported -H 'Content-Type: application/json' $HEADER_ARGS --data-binary @/tmp/payload.json"
+                    if [ -n "{{ .Values.actualbudgetIntegration.authHeader }}" ]; then
+                      curl -fsS -X POST "{{ $classifierBaseUrl }}/events/transactions/imported" -H "Content-Type: application/json" -H "{{ .Values.actualbudgetIntegration.authHeader }}" --data-binary @/tmp/payload.json
+                    else
+                      curl -fsS -X POST "{{ $classifierBaseUrl }}/events/transactions/imported" -H "Content-Type: application/json" --data-binary @/tmp/payload.json
+                    fi
                   fi
 {{- end }}

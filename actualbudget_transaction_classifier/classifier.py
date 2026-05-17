@@ -644,44 +644,118 @@ class TransactionClassifierPlugin:
         }
         return _map.get(category, "Uncategorized")
 
-    def classify(self, payload: TransactionPayload) -> ClassificationResult:
-        existing = self.classification_history.get(payload.transaction_id)
-        if existing:
-            cached = self.classification_cache.get(payload.transaction_id)
-            if cached:
-                if existing.corrected and existing.corrected_category:
-                    corrected = ClassificationResult(**cached.__dict__)
-                    corrected.category = existing.corrected_category
-                    corrected.coarse_category = self._coarse_from_category(existing.corrected_category)
-                    corrected.source = "history_cache"
-                    corrected.explanations = list(cached.explanations) + ["corrected_by_user=true"]
-                    corrected.hierarchy_path = [corrected.flow, corrected.coarse_category, corrected.category]
-                    return corrected
+    def _cached_classification(self, transaction_id: str) -> Optional[ClassificationResult]:
+        history = self.classification_history.get(transaction_id)
+        cached = self.classification_cache.get(transaction_id)
+        if not history or not cached:
+            return None
 
-                result = ClassificationResult(**cached.__dict__)
-                result.source = "history_cache"
-                return result
+        result = ClassificationResult(**cached.__dict__)
+        result.source = "history_cache"
+        if not history.corrected or not history.corrected_category:
+            return result
+
+        result.category = history.corrected_category
+        result.coarse_category = self._coarse_from_category(history.corrected_category)
+        result.explanations = list(cached.explanations) + ["corrected_by_user=true"]
+        result.hierarchy_path = [result.flow, result.coarse_category, result.category]
+        return result
+
+    @staticmethod
+    def _boost_history_scores(
+        model_scores: Dict[str, float],
+        history_match: Optional[Tuple[str, float]],
+    ) -> Tuple[Dict[str, float], Optional[float]]:
+        category_scores = dict(model_scores)
+        if not history_match:
+            return category_scores, None
+
+        history_category, consistency = history_match
+        category_scores[history_category] = category_scores.get(history_category, 0.0) + consistency * 0.4
+        return category_scores, consistency
+
+    @staticmethod
+    def _resolve_category(
+        rule: Optional[Dict[str, object]],
+        category_scores: Dict[str, float],
+    ) -> Tuple[str, float, Dict[str, float], str]:
+        if rule:
+            final_category = str(rule["category"])
+            confidence = float(rule.get("confidence", 1.0))
+            return final_category, confidence, {final_category: 1.0}, "rule_engine"
+
+        final_category, confidence, _, normalized_scores, _, _ = defuzzify(category_scores)
+        return final_category, confidence, normalized_scores, "hybrid"
+
+    def _record_classification_history(
+        self,
+        payload: TransactionPayload,
+        final_category: str,
+        confidence: float,
+        explanations: List[str],
+        result: ClassificationResult,
+    ) -> None:
+        self.classification_history[payload.transaction_id] = ClassificationHistoryEntry(
+            transaction_id=payload.transaction_id,
+            predicted_category=final_category,
+            corrected_category=None,
+            confidence=confidence,
+            explanation="; ".join(explanations),
+            corrected=False,
+        )
+        self.classification_cache[payload.transaction_id] = ClassificationResult(**result.__dict__)
+
+    def _update_merchant_state(self, merchant_canonical: str, final_category: str) -> None:
+        if merchant_canonical in self.merchant_registry:
+            self.merchant_registry[merchant_canonical].transaction_count += 1
+            if self.repository:
+                self.repository.upsert_merchant_intelligence(self.merchant_registry[merchant_canonical])
+
+        self.merchant_category_counts[merchant_canonical][final_category] += 1
+        if self.repository:
+            self.repository.upsert_merchant_category_count(
+                canonical_name=merchant_canonical,
+                category=final_category,
+                count=self.merchant_category_counts[merchant_canonical][final_category],
+            )
+
+    def _store_review_item(
+        self,
+        transaction_id: str,
+        review_required: bool,
+        review_reason: Optional[str],
+        confidence: float,
+        final_category: str,
+        explanations: List[str],
+        alternatives: List[str],
+    ) -> None:
+        if not review_required:
+            return
+
+        review_item = ReviewQueueEntry(
+            transaction_id=transaction_id,
+            reason=review_reason or "manual_review",
+            confidence=confidence,
+            predicted_category=final_category,
+            explanations=explanations,
+            suggested_alternatives=alternatives,
+        )
+        self.review_queue[transaction_id] = review_item
+        if self.repository:
+            self.repository.save_review_item(review_item)
+
+    def classify(self, payload: TransactionPayload) -> ClassificationResult:
+        cached_result = self._cached_classification(payload.transaction_id)
+        if cached_result:
+            return cached_result
 
         merchant_canonical, normalization_trace = self.normalizer.normalize(payload.merchant, self._alias_map())
         rule, rule_matches = self.rule_engine.apply(merchant_canonical, payload.notes, payload.amount)
         flow, _, _, model_scores, _ = self.ml.infer(merchant_canonical, payload.amount)
 
         history_match = self._user_history_match(merchant_canonical)
-        history_consistency = history_match[1] if history_match else None
-
-        category_scores = dict(model_scores)
-        if history_match:
-            history_category, consistency = history_match
-            category_scores[history_category] = category_scores.get(history_category, 0.0) + consistency * 0.4
-
-        if rule:
-            final_category = str(rule["category"])
-            confidence = float(rule.get("confidence", 1.0))
-            normalized_scores = {final_category: 1.0}
-            source = "rule_engine"
-        else:
-            final_category, confidence, _, normalized_scores, _, _ = defuzzify(category_scores)
-            source = "hybrid"
+        category_scores, history_consistency = self._boost_history_scores(model_scores, history_match)
+        final_category, confidence, normalized_scores, source = self._resolve_category(rule, category_scores)
 
         confidence = self.calibrator.calibrate(confidence)
         coarse_category = self._coarse_from_category(final_category)
@@ -720,41 +794,17 @@ class TransactionClassifierPlugin:
             suggested_alternatives=alternatives,
         )
 
-        self.classification_history[payload.transaction_id] = ClassificationHistoryEntry(
+        self._record_classification_history(payload, final_category, confidence, explanations, result)
+        self._update_merchant_state(merchant_canonical, final_category)
+        self._store_review_item(
             transaction_id=payload.transaction_id,
-            predicted_category=final_category,
-            corrected_category=None,
+            review_required=review_required,
+            review_reason=review_reason,
             confidence=confidence,
-            explanation="; ".join(explanations),
-            corrected=False,
+            final_category=final_category,
+            explanations=explanations,
+            alternatives=alternatives,
         )
-        self.classification_cache[payload.transaction_id] = ClassificationResult(**result.__dict__)
-
-        if merchant_canonical in self.merchant_registry:
-            self.merchant_registry[merchant_canonical].transaction_count += 1
-            if self.repository:
-                self.repository.upsert_merchant_intelligence(self.merchant_registry[merchant_canonical])
-
-        self.merchant_category_counts[merchant_canonical][final_category] += 1
-        if self.repository:
-            self.repository.upsert_merchant_category_count(
-                canonical_name=merchant_canonical,
-                category=final_category,
-                count=self.merchant_category_counts[merchant_canonical][final_category],
-            )
-
-        if review_required:
-            review_item = ReviewQueueEntry(
-                transaction_id=payload.transaction_id,
-                reason=review_reason or "manual_review",
-                confidence=confidence,
-                predicted_category=final_category,
-                explanations=explanations,
-                suggested_alternatives=alternatives,
-            )
-            self.review_queue[payload.transaction_id] = review_item
-            if self.repository:
-                self.repository.save_review_item(review_item)
 
         if self.repository:
             self.repository.save_classification(payload, result)
