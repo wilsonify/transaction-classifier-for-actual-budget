@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict
-from fastapi import FastAPI, HTTPException, Request
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
 from .api import ClassifierAPI
 from .classifier import TransactionClassifierPlugin
 from .storage import PluginRepository
@@ -85,14 +88,14 @@ def create_fastapi_app() -> Any:
         raw_body = await request.body()
         status, payload = api.handle_request("POST", "/" + full_path, raw_body.decode("utf-8"))
         if status >= 400:
-            raise HTTPException(status_code=status, detail=payload)
+            return JSONResponse(status_code=status, content=payload)
         return payload
 
     @app.get("/{full_path:path}")
     async def fallback_get(full_path: str) -> Dict[str, Any]:
         status, payload = api.handle_request("GET", "/" + full_path)
         if status >= 400:
-            raise HTTPException(status_code=status, detail=payload)
+            return JSONResponse(status_code=status, content=payload)
         return payload
 
     return app

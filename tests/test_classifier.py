@@ -1,8 +1,12 @@
 import unittest
+from os import environ
 from tempfile import TemporaryDirectory
+
+from fastapi.testclient import TestClient
 
 from actualbudget_transaction_classifier.api import ClassifierAPI
 from actualbudget_transaction_classifier.classifier import MerchantNormalizer, TransactionClassifierPlugin
+from actualbudget_transaction_classifier.service import create_fastapi_app
 from actualbudget_transaction_classifier.storage import PluginRepository
 from actualbudget_transaction_classifier.models import TransactionPayload
 
@@ -238,6 +242,26 @@ class PersistentPluginApiTests(unittest.TestCase):
                 self.assertTrue(run_body["updated"])
             finally:
                 repo.close()
+
+
+class FastApiServiceTests(unittest.TestCase):
+    def test_fallback_routes_return_structured_json_errors(self) -> None:
+        with TemporaryDirectory() as tmp:
+            previous_db_path = environ.get("ACTUAL_CLASSIFIER_DB_PATH")
+            environ["ACTUAL_CLASSIFIER_DB_PATH"] = f"{tmp}/classifier.db"
+            try:
+                client = TestClient(create_fastapi_app())
+                self.assertEqual({"error": "not_found"}, client.get("/missing").json())
+                self.assertEqual(404, client.get("/missing").status_code)
+
+                response = client.post("/missing", json={"ignored": True})
+                self.assertEqual(404, response.status_code)
+                self.assertEqual({"error": "not_found"}, response.json())
+            finally:
+                if previous_db_path is None:
+                    environ.pop("ACTUAL_CLASSIFIER_DB_PATH", None)
+                else:
+                    environ["ACTUAL_CLASSIFIER_DB_PATH"] = previous_db_path
 
 
 if __name__ == "__main__":
