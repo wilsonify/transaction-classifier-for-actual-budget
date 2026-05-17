@@ -73,6 +73,9 @@ jobs:
       contents: read
 
     steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
       - name: download-image-artifact
         uses: actions/download-artifact@v4
         with:
@@ -89,6 +92,18 @@ jobs:
       - name: run-unit-tests
         run: |
           docker run --rm \
+            --network none \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --tmpfs /run:rw,noexec,nosuid,size=16m \
+            -e TZ=UTC \
+            -e LC_ALL=C.UTF-8 \
+            -e LANG=C.UTF-8 \
+            -e PYTHONHASHSEED=0 \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -e PYTHONPATH=/app:/workspace \
+            -v "${{ github.workspace }}:/workspace:ro" \
+            -w /workspace \
             "${LOCAL_IMAGE}" \
             python -m unittest discover -s tests -v
 
