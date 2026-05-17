@@ -1,0 +1,6 @@
+{
+    "sonarlint.connectedMode.project": {
+        "connectionId": "wilsonify",
+        "projectKey": "wilsonify_transaction-classifier-for-actual-budget"
+    }
+}
