@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from .api import ClassifierAPI
@@ -16,13 +16,6 @@ def build_api() -> ClassifierAPI:
     repository = PluginRepository(db_path=db_path)
     plugin = TransactionClassifierPlugin(repository=repository)
     return ClassifierAPI(plugin=plugin)
-
-
-def build_error_response(status: int, payload: Dict[str, Any]) -> JSONResponse:
-    body: Dict[str, Any] = {"error": str(payload.get("error", "internal_error"))}
-    if "message" in payload:
-        body["message"] = str(payload["message"])
-    return JSONResponse(status_code=status, content=body)
 
 
 def create_fastapi_app() -> Any:
@@ -91,18 +84,11 @@ def create_fastapi_app() -> Any:
         return api.run_retrain_job(body)
 
     @app.post("/{full_path:path}")
-    async def fallback_post(full_path: str, request: Request) -> Dict[str, Any]:
-        raw_body = await request.body()
-        status, payload = api.handle_request("POST", "/" + full_path, raw_body.decode("utf-8"))
-        if status >= 400:
-            return build_error_response(status, payload)
-        return payload
+    async def fallback_post(full_path: str) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
 
     @app.get("/{full_path:path}")
-    async def fallback_get(full_path: str) -> Dict[str, Any]:
-        status, payload = api.handle_request("GET", "/" + full_path)
-        if status >= 400:
-            return build_error_response(status, payload)
-        return payload
+    async def fallback_get(full_path: str) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
 
     return app

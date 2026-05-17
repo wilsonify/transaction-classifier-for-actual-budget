@@ -258,14 +258,9 @@ class FastApiServiceTests(unittest.TestCase):
                 self.assertEqual(404, response.status_code)
                 self.assertEqual({"error": "not_found"}, response.json())
 
-                response = client.post(
-                    "/missing",
-                    data="{bad",
-                    headers={"Content-Type": "application/json"},
-                )
-                self.assertEqual(400, response.status_code)
-                self.assertEqual("invalid_json", response.json()["error"])
-                self.assertIn("valid JSON", response.json()["message"])
+                response = client.post("/missing", data="{bad", headers={"Content-Type": "application/json"})
+                self.assertEqual(404, response.status_code)
+                self.assertEqual({"error": "not_found"}, response.json())
             finally:
                 if previous_db_path is None:
                     environ.pop("ACTUAL_CLASSIFIER_DB_PATH", None)
