@@ -18,6 +18,13 @@ def build_api() -> ClassifierAPI:
     return ClassifierAPI(plugin=plugin)
 
 
+def build_error_response(status: int, payload: Dict[str, Any]) -> JSONResponse:
+    body: Dict[str, Any] = {"error": str(payload.get("error", "internal_error"))}
+    if "message" in payload:
+        body["message"] = str(payload["message"])
+    return JSONResponse(status_code=status, content=body)
+
+
 def create_fastapi_app() -> Any:
     api = build_api()
     app = FastAPI(
@@ -88,14 +95,14 @@ def create_fastapi_app() -> Any:
         raw_body = await request.body()
         status, payload = api.handle_request("POST", "/" + full_path, raw_body.decode("utf-8"))
         if status >= 400:
-            return JSONResponse(status_code=status, content=payload)
+            return build_error_response(status, payload)
         return payload
 
     @app.get("/{full_path:path}")
     async def fallback_get(full_path: str) -> Dict[str, Any]:
         status, payload = api.handle_request("GET", "/" + full_path)
         if status >= 400:
-            return JSONResponse(status_code=status, content=payload)
+            return build_error_response(status, payload)
         return payload
 
     return app
