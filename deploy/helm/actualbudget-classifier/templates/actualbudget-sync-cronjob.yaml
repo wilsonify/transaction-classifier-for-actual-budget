@@ -1,0 +1,34 @@
+{{- if .Values.actualbudgetIntegration.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "actualbudget-classifier.fullname" . }}-actual-sync
+  labels:
+    {{- include "actualbudget-classifier.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.actualbudgetIntegration.syncCronSchedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "actualbudget-classifier.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: sync-forwarder
+              image: curlimages/curl:8.8.0
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  HEADER_ARGS=""
+                  if [ -n "{{ .Values.actualbudgetIntegration.authHeader }}" ]; then
+                    HEADER_ARGS="-H {{ .Values.actualbudgetIntegration.authHeader | quote }}"
+                  fi
+                  eval "curl -fsS $HEADER_ARGS {{ .Values.actualbudgetIntegration.actualbudgetServiceUrl }}{{ .Values.actualbudgetIntegration.eventFeedPath }} > /tmp/payload.json"
+                  if [ -s /tmp/payload.json ]; then
+                    eval "curl -fsS -X POST {{ .Values.actualbudgetIntegration.classifierServiceUrl }}/events/transactions/imported -H 'Content-Type: application/json' $HEADER_ARGS --data-binary @/tmp/payload.json"
+                  fi
+{{- end }}

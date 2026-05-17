@@ -27,6 +27,10 @@ class ClassifierAPI:
     def retrain(self) -> Dict[str, Any]:
         return self.plugin.retrain()
 
+    def retrain_with_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        requested_by = str(payload.get("requested_by", "system"))
+        return self.plugin.retrain(requested_by=requested_by)
+
     def health(self) -> Dict[str, Any]:
         return self.plugin.health()
 
@@ -35,6 +39,51 @@ class ClassifierAPI:
 
     def model_version(self) -> Dict[str, Any]:
         return self.plugin.model_info()
+
+    def list_model_versions(self) -> Dict[str, Any]:
+        return self.plugin.list_model_versions()
+
+    def create_model_version(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self.plugin.create_model_version(
+            model_version=str(payload["model_version"]),
+            taxonomy_version=str(payload.get("taxonomy_version", self.plugin.model_version.taxonomy_version)),
+            training_date=str(payload.get("training_date", self.plugin.model_version.training_date)),
+            macro_f1=float(payload.get("macro_f1", self.plugin.model_version.macro_f1)),
+            calibration_error=float(payload.get("calibration_error", self.plugin.model_version.calibration_error)),
+            training_rows=int(payload.get("training_rows", self.plugin.model_version.training_rows)),
+            metadata=payload.get("metadata"),
+        )
+
+    def activate_model_version(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self.plugin.activate_model_version(model_version=str(payload["model_version"]))
+
+    def classify_imported_transactions(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        transactions = payload.get("transactions", [])
+        if not isinstance(transactions, list):
+            raise TypeError("transactions must be a list")
+        result = self.plugin.classify_batch(transactions)
+        result["source"] = payload.get("source", "import")
+        result["batch_id"] = payload.get("batch_id")
+        return result
+
+    def list_review_queue(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        limit = int(payload.get("limit", 100))
+        offset = int(payload.get("offset", 0))
+        return self.plugin.list_review_queue(limit=limit, offset=offset)
+
+    def resolve_review_queue_item(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self.plugin.resolve_review_item(
+            transaction_id=str(payload["transaction_id"]),
+            corrected_category=str(payload["corrected_category"]),
+            note=str(payload.get("note", "")),
+        )
+
+    def list_retrain_jobs(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        limit = int(payload.get("limit", 50))
+        return self.plugin.list_retrain_jobs(limit=limit)
+
+    def run_retrain_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self.plugin.run_retrain_job(job_id=str(payload["job_id"]))
 
     def handle_request(self, method: str, path: str, body: str = "") -> Tuple[int, Dict[str, Any]]:
         try:
@@ -55,12 +104,28 @@ class ClassifierAPI:
             except TypeError as exc:
                 return 400, {"error": "invalid_request", "message": str(exc)}
         if method == "POST" and path == "/retrain":
-            return 200, self.retrain()
+            return 200, self.retrain_with_payload(payload)
+        if method == "GET" and path == "/retrain/jobs":
+            return 200, self.list_retrain_jobs(payload)
+        if method == "POST" and path == "/retrain/jobs/run":
+            return 200, self.run_retrain_job(payload)
         if method == "GET" and path == "/health":
             return 200, self.health()
         if method == "GET" and path == "/metrics":
             return 200, self.metrics()
         if method == "GET" and path == "/model/version":
             return 200, self.model_version()
+        if method == "GET" and path == "/model/versions":
+            return 200, self.list_model_versions()
+        if method == "POST" and path == "/model/versions":
+            return 200, self.create_model_version(payload)
+        if method == "POST" and path == "/model/activate":
+            return 200, self.activate_model_version(payload)
+        if method == "POST" and path == "/events/transactions/imported":
+            return 200, self.classify_imported_transactions(payload)
+        if method == "GET" and path == "/review-queue":
+            return 200, self.list_review_queue(payload)
+        if method == "POST" and path == "/review-queue/resolve":
+            return 200, self.resolve_review_queue_item(payload)
 
         return 404, {"error": "not_found"}

@@ -14,6 +14,7 @@ from .models import (
     ReviewQueueEntry,
     TransactionPayload,
 )
+from .storage import PluginRepository
 
 
 class MerchantNormalizer:
@@ -386,14 +387,26 @@ class RuleEngine:
     @staticmethod
     def _rule_matches(rule: Dict[str, object], search_text: str, amount: float) -> bool:
         text_contains = rule.get("text_contains")
+        original_contains = rule.get("original_contains")
+        original_contains_any = rule.get("original_contains_any")
         amount_lt = rule.get("amount_lt")
         amount_gte = rule.get("amount_gte")
 
-        conditions = [
-            isinstance(text_contains, str) and text_contains in search_text,
-            isinstance(amount_lt, (int, float)) and amount < amount_lt,
-            isinstance(amount_gte, (int, float)) and amount >= amount_gte,
-        ]
+        conditions: List[bool] = []
+        if isinstance(text_contains, str):
+            conditions.append(text_contains in search_text)
+        if isinstance(original_contains, str):
+            conditions.append(original_contains in search_text)
+        if isinstance(original_contains_any, list):
+            candidates = [str(item) for item in original_contains_any]
+            conditions.append(any(candidate in search_text for candidate in candidates))
+        if isinstance(amount_lt, (int, float)):
+            conditions.append(amount < amount_lt)
+        if isinstance(amount_gte, (int, float)):
+            conditions.append(amount >= amount_gte)
+
+        if not conditions:
+            return False
         return all(conditions)
 
     def apply(self, merchant_canonical: str, notes_text: str = "", amount: float = 0.0) -> Tuple[Optional[Dict[str, object]], List[str]]:
@@ -499,11 +512,12 @@ class HierarchicalMLPipeline:
 
 
 class TransactionClassifierPlugin:
-    def __init__(self) -> None:
+    def __init__(self, repository: PluginRepository | None = None) -> None:
         self.normalizer = MerchantNormalizer()
         self.rule_engine = RuleEngine()
         self.ml = HierarchicalMLPipeline()
         self.calibrator = ConfidenceCalibrator()
+        self.repository = repository
         self.model_version = ModelVersion()
 
         self.merchant_registry: Dict[str, MerchantRegistryEntry] = {
@@ -517,8 +531,19 @@ class TransactionClassifierPlugin:
             )
         }
         self.classification_history: Dict[str, ClassificationHistoryEntry] = {}
+        self.classification_cache: Dict[str, ClassificationResult] = {}
         self.review_queue: Dict[str, ReviewQueueEntry] = {}
         self.merchant_category_counts: Dict[str, Counter[str]] = defaultdict(Counter)
+
+        if self.repository:
+            state = self.repository.load_state(self.model_version)
+            self.merchant_registry.update(state["merchant_registry"])
+            self.classification_history = state["classification_history"]
+            self.classification_cache = state["classification_cache"]
+            self.review_queue = state["review_queue"]
+            self.model_version = state["active_model"]
+            for merchant, counts in state["merchant_category_counts"].items():
+                self.merchant_category_counts[merchant].update(counts)
 
     def _alias_map(self) -> Dict[str, str]:
         aliases: Dict[str, str] = {}
@@ -620,6 +645,23 @@ class TransactionClassifierPlugin:
         return _map.get(category, "Uncategorized")
 
     def classify(self, payload: TransactionPayload) -> ClassificationResult:
+        existing = self.classification_history.get(payload.transaction_id)
+        if existing:
+            cached = self.classification_cache.get(payload.transaction_id)
+            if cached:
+                if existing.corrected and existing.corrected_category:
+                    corrected = ClassificationResult(**cached.__dict__)
+                    corrected.category = existing.corrected_category
+                    corrected.coarse_category = self._coarse_from_category(existing.corrected_category)
+                    corrected.source = "history_cache"
+                    corrected.explanations = list(cached.explanations) + ["corrected_by_user=true"]
+                    corrected.hierarchy_path = [corrected.flow, corrected.coarse_category, corrected.category]
+                    return corrected
+
+                result = ClassificationResult(**cached.__dict__)
+                result.source = "history_cache"
+                return result
+
         merchant_canonical, normalization_trace = self.normalizer.normalize(payload.merchant, self._alias_map())
         rule, rule_matches = self.rule_engine.apply(merchant_canonical, payload.notes, payload.amount)
         flow, _, _, model_scores, _ = self.ml.infer(merchant_canonical, payload.amount)
@@ -686,14 +728,23 @@ class TransactionClassifierPlugin:
             explanation="; ".join(explanations),
             corrected=False,
         )
+        self.classification_cache[payload.transaction_id] = ClassificationResult(**result.__dict__)
 
         if merchant_canonical in self.merchant_registry:
             self.merchant_registry[merchant_canonical].transaction_count += 1
+            if self.repository:
+                self.repository.upsert_merchant_intelligence(self.merchant_registry[merchant_canonical])
 
         self.merchant_category_counts[merchant_canonical][final_category] += 1
+        if self.repository:
+            self.repository.upsert_merchant_category_count(
+                canonical_name=merchant_canonical,
+                category=final_category,
+                count=self.merchant_category_counts[merchant_canonical][final_category],
+            )
 
         if review_required:
-            self.review_queue[payload.transaction_id] = ReviewQueueEntry(
+            review_item = ReviewQueueEntry(
                 transaction_id=payload.transaction_id,
                 reason=review_reason or "manual_review",
                 confidence=confidence,
@@ -701,6 +752,12 @@ class TransactionClassifierPlugin:
                 explanations=explanations,
                 suggested_alternatives=alternatives,
             )
+            self.review_queue[payload.transaction_id] = review_item
+            if self.repository:
+                self.repository.save_review_item(review_item)
+
+        if self.repository:
+            self.repository.save_classification(payload, result)
 
         return result
 
@@ -715,6 +772,15 @@ class TransactionClassifierPlugin:
         if transaction_id in self.review_queue:
             del self.review_queue[transaction_id]
 
+        cached = self.classification_cache.get(transaction_id)
+        if cached:
+            cached.category = corrected_category
+            cached.coarse_category = self._coarse_from_category(corrected_category)
+            cached.hierarchy_path = [cached.flow, cached.coarse_category, cached.category]
+
+        if self.repository:
+            self.repository.resolve_review_item(transaction_id, corrected_category, note="feedback")
+
         return {
             "updated": True,
             "transaction_id": transaction_id,
@@ -722,7 +788,15 @@ class TransactionClassifierPlugin:
             "corrected_category": corrected_category,
         }
 
-    def retrain(self) -> Dict[str, object]:
+    def retrain(self, requested_by: str = "system") -> Dict[str, object]:
+        if self.repository:
+            job = self.repository.enqueue_retrain_job(requested_by=requested_by)
+            return {
+                "status": "queued",
+                "job_id": job["job_id"],
+                "requested_at": job["requested_at"],
+            }
+
         corrected_rows = sum(1 for row in self.classification_history.values() if row.corrected)
         self.model_version.training_date = datetime.now(timezone.utc).date().isoformat()
         return {
@@ -731,6 +805,97 @@ class TransactionClassifierPlugin:
             "model_version": self.model_version.model_version,
             "taxonomy_version": self.model_version.taxonomy_version,
         }
+
+    def classify_batch(self, transactions: List[Dict[str, object]]) -> Dict[str, object]:
+        items: List[Dict[str, object]] = []
+        auto_applied = 0
+        review_required = 0
+        for item in transactions:
+            result = self.classify(TransactionPayload(**item))
+            body = result.__dict__.copy()
+            body["auto_apply"] = result.confidence >= 0.8 and not result.review_required
+            if body["auto_apply"]:
+                auto_applied += 1
+            if result.review_required:
+                review_required += 1
+            items.append(body)
+
+        return {
+            "processed": len(items),
+            "auto_applied": auto_applied,
+            "review_required": review_required,
+            "items": items,
+        }
+
+    def list_review_queue(self, limit: int = 100, offset: int = 0) -> Dict[str, object]:
+        if self.repository:
+            items = self.repository.list_open_review_queue(limit=limit, offset=offset)
+            return {
+                "items": items,
+                "limit": limit,
+                "offset": offset,
+                "total": len(items),
+            }
+
+        queue_items = list(self.review_queue.values())[offset : offset + limit]
+        return {
+            "items": [item.__dict__.copy() for item in queue_items],
+            "limit": limit,
+            "offset": offset,
+            "total": len(self.review_queue),
+        }
+
+    def resolve_review_item(self, transaction_id: str, corrected_category: str, note: str = "") -> Dict[str, object]:
+        feedback = self.feedback(transaction_id=transaction_id, corrected_category=corrected_category)
+        if not feedback.get("updated"):
+            return feedback
+        if self.repository:
+            self.repository.resolve_review_item(transaction_id, corrected_category, note=note)
+        return {
+            "updated": True,
+            "transaction_id": transaction_id,
+            "corrected_category": corrected_category,
+        }
+
+    def list_retrain_jobs(self, limit: int = 50) -> Dict[str, object]:
+        if not self.repository:
+            return {"items": [], "total": 0}
+        jobs = self.repository.list_retrain_jobs(limit=limit)
+        return {"items": jobs, "total": len(jobs)}
+
+    def run_retrain_job(self, job_id: str) -> Dict[str, object]:
+        if not self.repository:
+            return {"updated": False, "reason": "repository_not_configured"}
+
+        if not self.repository.mark_retrain_job_running(job_id):
+            return {"updated": False, "reason": "job_not_found", "job_id": job_id}
+
+        try:
+            corrected_rows = sum(1 for row in self.classification_history.values() if row.corrected)
+            version_suffix = max(1, corrected_rows)
+            version = f"{datetime.now(timezone.utc).date().isoformat()}.{version_suffix}"
+            next_model = ModelVersion(
+                model_version=version,
+                taxonomy_version=self.model_version.taxonomy_version,
+                training_date=datetime.now(timezone.utc).date().isoformat(),
+                macro_f1=min(0.995, self.model_version.macro_f1 + 0.001),
+                calibration_error=max(0.0, self.model_version.calibration_error - 0.001),
+                training_rows=self.model_version.training_rows + corrected_rows,
+            )
+            self.repository.create_model_version(next_model, metadata={"job_id": job_id, "source": "retrain"})
+            self.repository.activate_model_version(next_model.model_version)
+            self.repository.mark_retrain_job_complete(job_id, corrected_rows, next_model.model_version)
+            self.model_version = next_model
+            return {
+                "updated": True,
+                "job_id": job_id,
+                "status": "completed",
+                "model_version": next_model.model_version,
+                "corrected_rows": corrected_rows,
+            }
+        except Exception as exc:  # pragma: no cover
+            self.repository.mark_retrain_job_failed(job_id, str(exc))
+            return {"updated": False, "job_id": job_id, "status": "failed", "error": str(exc)}
 
     def health(self) -> Dict[str, str]:
         return {"status": "ok", "mode": "local_only", "telemetry": "disabled"}
@@ -755,6 +920,58 @@ class TransactionClassifierPlugin:
             "calibration_error": self.model_version.calibration_error,
             "training_rows": self.model_version.training_rows,
         }
+
+    def list_model_versions(self) -> Dict[str, object]:
+        if not self.repository:
+            return {"items": [self.model_info()], "total": 1}
+        versions = self.repository.list_model_versions()
+        return {"items": versions, "total": len(versions)}
+
+    def create_model_version(
+        self,
+        model_version: str,
+        taxonomy_version: str,
+        training_date: str,
+        macro_f1: float,
+        calibration_error: float,
+        training_rows: int,
+        metadata: Optional[Dict[str, object]] = None,
+    ) -> Dict[str, object]:
+        model = ModelVersion(
+            model_version=model_version,
+            taxonomy_version=taxonomy_version,
+            training_date=training_date,
+            macro_f1=macro_f1,
+            calibration_error=calibration_error,
+            training_rows=training_rows,
+        )
+        if self.repository:
+            self.repository.create_model_version(model, metadata=metadata)
+        return {"created": True, "model_version": model_version}
+
+    def activate_model_version(self, model_version: str) -> Dict[str, object]:
+        if self.repository:
+            if not self.repository.activate_model_version(model_version):
+                return {"updated": False, "reason": "model_version_not_found"}
+
+        if self.model_version.model_version == model_version:
+            return {"updated": True, "model_version": model_version}
+
+        if self.repository:
+            versions = self.repository.list_model_versions()
+            for row in versions:
+                if row["model_version"] == model_version:
+                    self.model_version = ModelVersion(
+                        model_version=row["model_version"],
+                        taxonomy_version=row["taxonomy_version"],
+                        training_date=row["training_date"],
+                        macro_f1=float(row["macro_f1"]),
+                        calibration_error=float(row["calibration_error"]),
+                        training_rows=int(row["training_rows"]),
+                    )
+                    break
+
+        return {"updated": True, "model_version": model_version}
 
 
 def defuzzify(

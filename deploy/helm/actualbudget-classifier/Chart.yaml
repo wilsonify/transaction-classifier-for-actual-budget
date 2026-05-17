@@ -1,0 +1,6 @@
+apiVersion: v2
+name: actualbudget-classifier
+description: Local-only transaction classifier service for ActualBudget
+version: 0.1.0
+appVersion: "1.0.0"
+type: application

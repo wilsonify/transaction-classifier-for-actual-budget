@@ -1,7 +1,9 @@
 import unittest
+from tempfile import TemporaryDirectory
 
 from actualbudget_transaction_classifier.api import ClassifierAPI
 from actualbudget_transaction_classifier.classifier import MerchantNormalizer, TransactionClassifierPlugin
+from actualbudget_transaction_classifier.storage import PluginRepository
 from actualbudget_transaction_classifier.models import TransactionPayload
 
 
@@ -133,6 +135,73 @@ class ApiEndpointTests(unittest.TestCase):
         status, body = self.api.handle_request("POST", "/classify", '{"transaction_id":"txn_missing"}')
         self.assertEqual(400, status)
         self.assertEqual("invalid_request", body["error"])
+
+
+class PersistentPluginApiTests(unittest.TestCase):
+    def test_persistent_review_queue_and_lifecycle_endpoints(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = PluginRepository(db_path=f"{tmp}/classifier.db")
+            try:
+                plugin = TransactionClassifierPlugin(repository=repo)
+                api = ClassifierAPI(plugin=plugin)
+
+                status, batch_body = api.handle_request(
+                    "POST",
+                    "/events/transactions/imported",
+                    """
+                    {
+                      "source": "sync",
+                      "transactions": [
+                        {"transaction_id":"txn_batch_1","merchant":"Unknown Merchant","amount":-12.0,"date":"2026-05-17"}
+                      ]
+                    }
+                    """,
+                )
+                self.assertEqual(200, status)
+                self.assertEqual(1, batch_body["processed"])
+
+                status, review_body = api.handle_request("GET", "/review-queue")
+                self.assertEqual(200, status)
+                self.assertGreaterEqual(review_body["total"], 1)
+
+                status, resolve_body = api.handle_request(
+                    "POST",
+                    "/review-queue/resolve",
+                    '{"transaction_id":"txn_batch_1","corrected_category":"groceries"}',
+                )
+                self.assertEqual(200, status)
+                self.assertTrue(resolve_body["updated"])
+
+                status, create_model_body = api.handle_request(
+                    "POST",
+                    "/model/versions",
+                    '{"model_version":"2026.05.17.1","taxonomy_version":"v3","training_date":"2026-05-17","macro_f1":0.94,"calibration_error":0.03,"training_rows":90000}',
+                )
+                self.assertEqual(200, status)
+                self.assertTrue(create_model_body["created"])
+
+                status, activate_body = api.handle_request(
+                    "POST",
+                    "/model/activate",
+                    '{"model_version":"2026.05.17.1"}',
+                )
+                self.assertEqual(200, status)
+                self.assertTrue(activate_body["updated"])
+
+                status, retrain_body = api.handle_request("POST", "/retrain", '{"requested_by":"test"}')
+                self.assertEqual(200, status)
+                self.assertEqual("queued", retrain_body["status"])
+                self.assertIn("job_id", retrain_body)
+
+                status, run_body = api.handle_request(
+                    "POST",
+                    "/retrain/jobs/run",
+                    '{"job_id":"' + retrain_body["job_id"] + '"}',
+                )
+                self.assertEqual(200, status)
+                self.assertTrue(run_body["updated"])
+            finally:
+                repo.close()
 
 
 if __name__ == "__main__":

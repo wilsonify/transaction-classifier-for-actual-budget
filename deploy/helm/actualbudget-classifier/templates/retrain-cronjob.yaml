@@ -1,0 +1,35 @@
+{{- if .Values.retrainingCron.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "actualbudget-classifier.fullname" . }}-retrain
+  labels:
+    {{- include "actualbudget-classifier.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.retrainingCron.schedule | quote }}
+  concurrencyPolicy: {{ .Values.retrainingCron.concurrencyPolicy }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "actualbudget-classifier.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: retrain
+              image: curlimages/curl:8.8.0
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  RESPONSE=$(curl -fsS -X POST "http://{{ include "actualbudget-classifier.fullname" . }}:{{ .Values.service.port }}/retrain" \
+                    -H "Content-Type: application/json" \
+                    -d '{"requested_by":"{{ .Values.retrainingCron.requestedBy }}"}')
+                  JOB_ID=$(echo "$RESPONSE" | sed -n 's/.*"job_id"[ ]*:[ ]*"\([^"]*\)".*/\1/p')
+                  if [ -n "$JOB_ID" ]; then
+                    curl -fsS -X POST "http://{{ include "actualbudget-classifier.fullname" . }}:{{ .Values.service.port }}/retrain/jobs/run" \
+                      -H "Content-Type: application/json" \
+                      -d '{"job_id":"'"$JOB_ID"'"}'
+                  fi
+{{- end }}
